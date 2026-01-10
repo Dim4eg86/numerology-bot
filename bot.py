@@ -2,10 +2,15 @@
 # -*- coding: utf-8 -*-
 """
 Нумерология + Гороскоп бот
+Полная версия с оплатой, базой данных и обратной связью
 """
 
 import os
 import logging
+import uuid
+import hashlib
+import json
+from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     Application,
@@ -16,14 +21,239 @@ from telegram.ext import (
     ContextTypes,
     ConversationHandler
 )
+import asyncpg
 
+# Логирование
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
 
-WAITING_NAME, WAITING_DATE = range(2)
+# Состояния диалога
+WAITING_NAME, WAITING_DATE, WAITING_FEEDBACK, ADMIN_REPLY = range(4)
+
+# YooKassa настройки
+YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', '1216288')
+YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_ghw_QjfPTHOz06kkElqJGHqCZqAHxO9EtS1vdABx8BU')
+PRICE = 390  # Цена в рублях
+
+# Admin ID (твой Telegram ID для обратной связи)
+ADMIN_ID = os.getenv('ADMIN_TELEGRAM_ID', '')  # Добавим потом
+
+# База данных
+DATABASE_URL = os.getenv('DATABASE_URL', '')
+
+# ═══════════════════════════════════════════════════
+# БАЗА ДАННЫХ
+# ═══════════════════════════════════════════════════
+
+async def init_db():
+    """Инициализация базы данных"""
+    if not DATABASE_URL:
+        logger.warning("DATABASE_URL не установлен - БД не используется")
+        return None
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Создаём таблицу пользователей
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                username TEXT,
+                name TEXT,
+                birth_date TEXT,
+                life_path_number INTEGER,
+                zodiac_sign TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid BOOLEAN DEFAULT FALSE,
+                payment_id TEXT
+            )
+        ''')
+        
+        # Создаём таблицу платежей
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS payments (
+                payment_id TEXT PRIMARY KEY,
+                user_id BIGINT,
+                amount INTEGER,
+                status TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                paid_at TIMESTAMP
+            )
+        ''')
+        
+        # Создаём таблицу обратной связи
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS feedback (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                name TEXT,
+                message TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                replied BOOLEAN DEFAULT FALSE
+            )
+        ''')
+        
+        await conn.close()
+        logger.info("База данных инициализирована")
+        return True
+    except Exception as e:
+        logger.error(f"Ошибка инициализации БД: {e}")
+        return None
+
+
+async def save_user(user_id, username, name, birth_date, life_path, zodiac):
+    """Сохранить пользователя в БД"""
+    if not DATABASE_URL:
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            INSERT INTO users (user_id, username, name, birth_date, life_path_number, zodiac_sign)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (user_id) DO UPDATE SET
+                name = $3,
+                birth_date = $4,
+                life_path_number = $5,
+                zodiac_sign = $6
+        ''', user_id, username, name, birth_date, life_path, zodiac)
+        await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения пользователя: {e}")
+
+
+async def check_payment(user_id):
+    """Проверить оплатил ли пользователь"""
+    if not DATABASE_URL:
+        return True  # Если нет БД - даём доступ
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        result = await conn.fetchval('SELECT paid FROM users WHERE user_id = $1', user_id)
+        await conn.close()
+        return result if result else False
+    except:
+        return True  # В случае ошибки даём доступ
+
+
+async def mark_as_paid(user_id, payment_id):
+    """Отметить пользователя как оплатившего"""
+    if not DATABASE_URL:
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            UPDATE users SET paid = TRUE, payment_id = $2 WHERE user_id = $1
+        ''', user_id, payment_id)
+        await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка обновления статуса оплаты: {e}")
+
+
+async def save_feedback(user_id, username, name, message):
+    """Сохранить обратную связь"""
+    if not DATABASE_URL:
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            INSERT INTO feedback (user_id, username, name, message)
+            VALUES ($1, $2, $3, $4)
+        ''', user_id, username, name, message)
+        await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения обратной связи: {e}")
+
+
+# ═══════════════════════════════════════════════════
+# YOOKASSA ОПЛАТА
+# ═══════════════════════════════════════════════════
+
+def create_payment_link(user_id, amount=PRICE):
+    """Создать ссылку на оплату YooKassa"""
+    import requests
+    import base64
+    
+    # Генерируем уникальный ID платежа
+    payment_id = str(uuid.uuid4())
+    
+    # Базовая авторизация
+    credentials = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}"
+    encoded_credentials = base64.b64encode(credentials.encode()).decode()
+    
+    headers = {
+        "Authorization": f"Basic {encoded_credentials}",
+        "Idempotence-Key": payment_id,
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "amount": {
+            "value": f"{amount}.00",
+            "currency": "RUB"
+        },
+        "confirmation": {
+            "type": "redirect",
+            "return_url": "https://t.me/astro_numero_bot"  # Замени на username бота
+        },
+        "capture": True,
+        "description": f"Нумерологический разбор для пользователя {user_id}",
+        "metadata": {
+            "user_id": str(user_id)
+        }
+    }
+    
+    try:
+        response = requests.post(
+            "https://api.yookassa.ru/v3/payments",
+            headers=headers,
+            json=data
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['confirmation']['confirmation_url'], result['id']
+        else:
+            logger.error(f"Ошибка создания платежа: {response.text}")
+            return None, None
+    except Exception as e:
+        logger.error(f"Ошибка при создании платежа: {e}")
+        return None, None
+
+
+async def check_payment_status(payment_id):
+    """Проверить статус платежа"""
+    import requests
+    import base64
+    
+    credentials = f"{YOOKASSA_SHOP_ID}:{YOOKASSA_SECRET_KEY}"
+    encoded_credentials = base64.b64encode(credentials.encode()).decode()
+    
+    headers = {
+        "Authorization": f"Basic {encoded_credentials}",
+        "Content-Type": "application/json"
+    }
+    
+    try:
+        response = requests.get(
+            f"https://api.yookassa.ru/v3/payments/{payment_id}",
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            result = response.json()
+            return result['status'] == 'succeeded'
+        else:
+            return False
+    except Exception as e:
+        logger.error(f"Ошибка проверки платежа: {e}")
+        return False
 
 def calculate_life_path_number(birth_date):
     """Вычисляет число жизненного пути"""
@@ -935,37 +1165,143 @@ NUMEROLOGY_TEXTS = {
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start"""
+    """Команда /start с картинкой"""
     keyboard = [
-        [InlineKeyboardButton("✨ Узнать своё предназначение", callback_data='buy')]
+        [InlineKeyboardButton("✨ Узнать своё предназначение — 390 ₽", callback_data='buy')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    await update.message.reply_text(
+    # Отправляем картинку с текстом
+    caption = (
         "🌟 *НУМЕРОЛОГИЯ + ГОРОСКОП* 🌙\n\n"
-        "Откройте тайны своей судьбы!\n\n"
+        "✨ Откройте тайны своей судьбы!\n\n"
         "Вы получите:\n"
         "💫 Полный нумерологический разбор\n"
-        "🌙 Персональный гороскоп на месяц\n"
-        "💝 Советы по отношениям и карьере\n\n"
-        "*Цена: 390 ₽*\n\n"
-        "Более 1000 довольных клиентов! ⭐⭐⭐⭐⭐",
-        parse_mode='Markdown',
-        reply_markup=reply_markup
+        "🔮 Персональный гороскоп на месяц\n"
+        "❤️ Советы по отношениям и карьере\n"
+        "💡 Рекомендации для успеха\n\n"
+        "💰 *Цена: 390 ₽*\n\n"
+        "⭐ Более 1000 довольных клиентов!"
     )
+    
+    # Путь к картинке (будет на сервере)
+    photo_path = os.path.join(os.path.dirname(__file__), 'welcome_image.png')
+    
+    try:
+        # Пробуем отправить локальную картинку
+        if os.path.exists(photo_path):
+            with open(photo_path, 'rb') as photo:
+                await update.message.reply_photo(
+                    photo=photo,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+        else:
+            # Если картинки нет - отправляем просто текст
+            await update.message.reply_text(
+                caption,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+    except:
+        # Фоллбек на текст если что-то пошло не так
+        await update.message.reply_text(
+            caption,
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+    
     return ConversationHandler.END
 
 
 async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Обработка кнопки Купить"""
+    """Обработка кнопки Купить - проверяем оплату"""
     query = update.callback_query
     await query.answer()
     
-    await query.message.reply_text(
-        "Отлично! Давайте познакомимся 😊\n\n"
-        "Как вас зовут?"
-    )
-    return WAITING_NAME
+    user_id = query.from_user.id
+    
+    # Проверяем оплату в БД
+    has_paid = await check_payment(user_id)
+    
+    if has_paid:
+        # Уже оплатил - спрашиваем данные
+        await query.message.reply_text(
+            "Отлично! Давайте познакомимся 😊\n\n"
+            "Как вас зовут?"
+        )
+        return WAITING_NAME
+    else:
+        # Нужна оплата
+        payment_url, payment_id = create_payment_link(user_id, PRICE)
+        
+        if payment_url:
+            # Сохраняем payment_id в контексте
+            context.user_data['payment_id'] = payment_id
+            
+            keyboard = [
+                [InlineKeyboardButton("💳 Оплатить 390 ₽", url=payment_url)],
+                [InlineKeyboardButton("✅ Я оплатил(а)", callback_data='check_payment')]
+            ]
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            
+            await query.message.reply_text(
+                "💰 *Оплата нумерологического разбора*\n\n"
+                "Цена: *390 ₽*\n\n"
+                "После оплаты нажмите кнопку \"Я оплатил(а)\"\n\n"
+                "🔒 Безопасная оплата через ЮKassa",
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+            return ConversationHandler.END
+        else:
+            await query.message.reply_text(
+                "Произошла ошибка при создании платежа 😞\n"
+                "Пожалуйста, попробуйте позже или напишите в поддержку."
+            )
+            return ConversationHandler.END
+
+
+async def check_payment_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Проверка оплаты после нажатия кнопки"""
+    query = update.callback_query
+    await query.answer("Проверяем оплату...")
+    
+    user_id = query.from_user.id
+    payment_id = context.user_data.get('payment_id')
+    
+    if not payment_id:
+        await query.message.reply_text(
+            "Не найден ID платежа. Пожалуйста, начните заново /start"
+        )
+        return ConversationHandler.END
+    
+    # Проверяем статус в YooKassa
+    is_paid = await check_payment_status(payment_id)
+    
+    if is_paid:
+        # Отмечаем в БД
+        await mark_as_paid(user_id, payment_id)
+        
+        await query.message.reply_text(
+            "✅ Оплата подтверждена! Спасибо! 💝\n\n"
+            "Теперь давайте познакомимся 😊\n\n"
+            "Как вас зовут?"
+        )
+        return WAITING_NAME
+    else:
+        keyboard = [
+            [InlineKeyboardButton("✅ Проверить ещё раз", callback_data='check_payment')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        await query.message.reply_text(
+            "⏳ Оплата ещё не поступила\n\n"
+            "Пожалуйста, завершите оплату и нажмите кнопку снова",
+            reply_markup=reply_markup
+        )
+        return ConversationHandler.END
 
 
 async def name_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1008,6 +1344,12 @@ async def date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     context.user_data['life_path'] = life_path
     context.user_data['zodiac'] = zodiac
+    
+    # Сохраняем в БД
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username or ""
+    name = context.user_data.get('name', '')
+    await save_user(user_id, username, name, birth_date, life_path, zodiac)
     
     await update.message.reply_text(
         "⏳ Рассчитываем ваш нумерологический портрет...\n\n"
@@ -1053,6 +1395,20 @@ async def send_numerology_report(update: Update, context: ContextTypes.DEFAULT_T
         f"{greeting}",
         parse_mode='Markdown',
         reply_markup=reply_markup
+    )
+    
+    # Добавляем сообщение с обратной связью
+    feedback_keyboard = [
+        [InlineKeyboardButton("💬 Написать отзыв / Задать вопрос", callback_data='feedback')]
+    ]
+    feedback_markup = InlineKeyboardMarkup(feedback_keyboard)
+    
+    await update.message.reply_text(
+        "💝 *Понравился разбор?*\n\n"
+        "Если у вас есть вопросы или вы хотите поделиться впечатлениями — "
+        "напишите нам! Мы обязательно ответим! 😊",
+        parse_mode='Markdown',
+        reply_markup=feedback_markup
     )
 
 
@@ -1107,6 +1463,103 @@ async def show_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+# ═══════════════════════════════════════════════════
+# ОБРАТНАЯ СВЯЗЬ
+# ═══════════════════════════════════════════════════
+
+async def feedback_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало обратной связи"""
+    query = update.callback_query
+    await query.answer()
+    
+    await query.message.reply_text(
+        "💬 *Обратная связь*\n\n"
+        "Напишите ваш вопрос, отзыв или пожелание.\n"
+        "Мы обязательно ответим вам! 😊\n\n"
+        "Или нажмите /cancel для отмены",
+        parse_mode='Markdown'
+    )
+    return WAITING_FEEDBACK
+
+
+async def feedback_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Получение сообщения обратной связи"""
+    user_id = update.message.from_user.id
+    username = update.message.from_user.username or ""
+    name = context.user_data.get('name', username or 'Пользователь')
+    message_text = update.message.text
+    
+    # Сохраняем в БД
+    await save_feedback(user_id, username, name, message_text)
+    
+    # Отправляем админу если указан
+    if ADMIN_ID:
+        try:
+            admin_keyboard = [
+                [InlineKeyboardButton("💬 Ответить", callback_data=f'reply_{user_id}')]
+            ]
+            admin_markup = InlineKeyboardMarkup(admin_keyboard)
+            
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"📩 *Новое сообщение от клиента*\n\n"
+                     f"👤 Имя: {name}\n"
+                     f"🆔 User ID: `{user_id}`\n"
+                     f"👤 Username: @{username}\n\n"
+                     f"💬 Сообщение:\n{message_text}",
+                parse_mode='Markdown',
+                reply_markup=admin_markup
+            )
+        except Exception as e:
+            logger.error(f"Ошибка отправки админу: {e}")
+    
+    await update.message.reply_text(
+        "✅ Спасибо за ваше сообщение!\n\n"
+        "Мы получили его и ответим в ближайшее время! 💝"
+    )
+    
+    return ConversationHandler.END
+
+
+async def admin_reply_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Начало ответа админа"""
+    query = update.callback_query
+    await query.answer()
+    
+    # Извлекаем user_id из callback_data
+    user_id = int(query.data.split('_')[1])
+    context.user_data['reply_to_user'] = user_id
+    
+    await query.message.reply_text(
+        f"💬 Напишите ответ пользователю {user_id}:\n\n"
+        f"Или /cancel для отмены"
+    )
+    return ADMIN_REPLY
+
+
+async def admin_reply_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Отправка ответа от админа пользователю"""
+    reply_text = update.message.text
+    user_id = context.user_data.get('reply_to_user')
+    
+    if not user_id:
+        await update.message.reply_text("Ошибка: не найден ID пользователя")
+        return ConversationHandler.END
+    
+    try:
+        await context.bot.send_message(
+            chat_id=user_id,
+            text=f"💝 *Ответ от поддержки:*\n\n{reply_text}",
+            parse_mode='Markdown'
+        )
+        
+        await update.message.reply_text("✅ Ответ отправлен!")
+    except Exception as e:
+        await update.message.reply_text(f"❌ Ошибка отправки: {e}")
+    
+    return ConversationHandler.END
+
+
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Отмена"""
     await update.message.reply_text(
@@ -1127,10 +1580,16 @@ def main():
     
     application = Application.builder().token(TOKEN).build()
     
+    # Инициализируем БД при старте
+    import asyncio
+    asyncio.get_event_loop().run_until_complete(init_db())
+    
+    # Основной conversation handler для покупки
     conv_handler = ConversationHandler(
         entry_points=[
             CommandHandler('start', start),
-            CallbackQueryHandler(buy_handler, pattern='^buy$')
+            CallbackQueryHandler(buy_handler, pattern='^buy$'),
+            CallbackQueryHandler(check_payment_handler, pattern='^check_payment$')
         ],
         states={
             WAITING_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, name_handler)],
@@ -1139,12 +1598,38 @@ def main():
         fallbacks=[CommandHandler('cancel', cancel)]
     )
     
+    # Feedback conversation handler
+    feedback_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(feedback_start, pattern='^feedback$')
+        ],
+        states={
+            WAITING_FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, feedback_handler)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
+    # Admin reply conversation handler
+    admin_reply_conv = ConversationHandler(
+        entry_points=[
+            CallbackQueryHandler(admin_reply_start, pattern='^reply_')
+        ],
+        states={
+            ADMIN_REPLY: [MessageHandler(filters.TEXT & ~filters.COMMAND, admin_reply_handler)],
+        },
+        fallbacks=[CommandHandler('cancel', cancel)]
+    )
+    
     application.add_handler(conv_handler)
+    application.add_handler(feedback_conv)
+    application.add_handler(admin_reply_conv)
     application.add_handler(CallbackQueryHandler(read_full_report, pattern='^read_'))
     application.add_handler(CallbackQueryHandler(show_section, pattern='^section_'))
     
     print("🚀 Бот запущен!")
     print("Напиши боту /start в Telegram")
+    
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
     
     application.run_polling(allowed_updates=Update.ALL_TYPES)
 
