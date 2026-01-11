@@ -36,7 +36,7 @@ WAITING_NAME, WAITING_DATE, WAITING_FEEDBACK, ADMIN_REPLY = range(4)
 # YooKassa настройки
 YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', '1216288')
 YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_ghw_QjfPTHOz06kkElqJGHqCZqAHxO9EtS1vdABx8BU')
-PRICE = 390  # Цена в рублях
+PRICE = 5  # Цена в рублях (тестовая)
 
 # Admin ID (твой Telegram ID для обратной связи)
 ADMIN_ID = os.getenv('ADMIN_TELEGRAM_ID', '')  # Добавим потом
@@ -1167,7 +1167,7 @@ NUMEROLOGY_TEXTS = {
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start с картинкой"""
     keyboard = [
-        [InlineKeyboardButton("✨ Узнать своё предназначение — 390 ₽", callback_data='buy')]
+        [InlineKeyboardButton("✨ Узнать своё предназначение — 5 ₽", callback_data='buy')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1180,7 +1180,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔮 Персональный гороскоп на месяц\n"
         "❤️ Советы по отношениям и карьере\n"
         "💡 Рекомендации для успеха\n\n"
-        "💰 *Цена: 390 ₽*\n\n"
+        "💰 *Тестовая цена: 5 ₽*\n\n"
         "⭐ Более 1000 довольных клиентов!"
     )
     
@@ -1241,14 +1241,14 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['payment_id'] = payment_id
             
             keyboard = [
-                [InlineKeyboardButton("💳 Оплатить 390 ₽", url=payment_url)],
+                [InlineKeyboardButton("💳 Оплатить 5 ₽", url=payment_url)],
                 [InlineKeyboardButton("✅ Я оплатил(а)", callback_data='check_payment')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.message.reply_text(
                 "💰 *Оплата нумерологического разбора*\n\n"
-                "Цена: *390 ₽*\n\n"
+                "Цена: *5 ₽* (тестовая)\n\n"
                 "После оплаты нажмите кнопку \"Я оплатил(а)\"\n\n"
                 "🔒 Безопасная оплата через ЮKassa",
                 parse_mode='Markdown',
