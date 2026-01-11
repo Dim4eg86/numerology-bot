@@ -1488,7 +1488,7 @@ async def read_full_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("❤️ Отношения и любовь", callback_data=f'section_relationships_{life_path}')],
         [InlineKeyboardButton("💼 Карьера и деньги", callback_data=f'section_career_{life_path}')],
         [InlineKeyboardButton("💡 Совет на каждый день", callback_data=f'section_advice_{life_path}')],
-        [InlineKeyboardButton("⬅️ Назад", callback_data='back_to_main')]
+        [InlineKeyboardButton("🏠 Главное меню", callback_data='back_to_start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1612,7 +1612,8 @@ async def show_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     section_text = number_data.get(section, "Раздел в разработке")
     
     keyboard = [
-        [InlineKeyboardButton("⬅️ К разделам", callback_data=f'read_{life_path}')]
+        [InlineKeyboardButton("⬅️ К разделам", callback_data=f'read_{life_path}')],
+        [InlineKeyboardButton("🏠 Главное меню", callback_data='back_to_start')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
