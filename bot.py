@@ -1165,7 +1165,68 @@ NUMEROLOGY_TEXTS = {
 
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Команда /start с картинкой"""
+    """Команда /start с картинкой и проверкой оплаты"""
+    user_id = update.message.from_user.id
+    
+    # Проверяем оплачивал ли пользователь раньше
+    has_paid = await check_payment(user_id)
+    
+    if has_paid:
+        # Уже оплачивал - показываем главное меню
+        keyboard = [
+            [InlineKeyboardButton("📖 Мой нумерологический разбор", callback_data='my_report')],
+            [InlineKeyboardButton("🌙 Гороскоп на месяц", callback_data='horoscope')],
+            [InlineKeyboardButton("💬 Написать отзыв / Задать вопрос", callback_data='feedback')]
+        ]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Получаем данные пользователя из БД
+        if DATABASE_URL:
+            try:
+                conn = await asyncpg.connect(DATABASE_URL)
+                user_data = await conn.fetchrow(
+                    'SELECT name, birth_date, life_path_number, zodiac_sign FROM users WHERE user_id = $1',
+                    user_id
+                )
+                await conn.close()
+                
+                if user_data:
+                    name = user_data['name'] or 'дорогая'
+                    birth_date = user_data['birth_date']
+                    life_path = user_data['life_path_number']
+                    zodiac = user_data['zodiac_sign']
+                    
+                    await update.message.reply_text(
+                        f"✨ *С возвращением, {name}!* ✨\n\n"
+                        f"Ваши данные:\n"
+                        f"📅 Дата рождения: {birth_date}\n"
+                        f"🔢 Число пути: {life_path}\n"
+                        f"♈ Знак зодиака: {zodiac}\n\n"
+                        f"Выберите действие:",
+                        parse_mode='Markdown',
+                        reply_markup=reply_markup
+                    )
+                    
+                    # Сохраняем данные в контекст для быстрого доступа
+                    context.user_data['name'] = name
+                    context.user_data['birth_date'] = birth_date
+                    context.user_data['life_path'] = life_path
+                    context.user_data['zodiac'] = zodiac
+                    
+                    return ConversationHandler.END
+            except Exception as e:
+                logger.error(f"Ошибка получения данных пользователя: {e}")
+        
+        # Если не удалось получить данные из БД
+        await update.message.reply_text(
+            "✨ *С возвращением!* ✨\n\n"
+            "Выберите действие:",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        return ConversationHandler.END
+    
+    # Новый пользователь - показываем приветствие
     keyboard = [
         [InlineKeyboardButton("✨ Узнать своё предназначение — 5 ₽", callback_data='buy')]
     ]
@@ -1439,6 +1500,105 @@ async def read_full_report(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def my_report_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Обработчик кнопки 'Мой разбор' - показывает главную карточку"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    
+    # Получаем данные из контекста или БД
+    name = context.user_data.get('name')
+    birth_date = context.user_data.get('birth_date')
+    life_path = context.user_data.get('life_path')
+    zodiac = context.user_data.get('zodiac')
+    
+    # Если в контексте нет - берём из БД
+    if not all([name, birth_date, life_path, zodiac]) and DATABASE_URL:
+        try:
+            conn = await asyncpg.connect(DATABASE_URL)
+            user_data = await conn.fetchrow(
+                'SELECT name, birth_date, life_path_number, zodiac_sign FROM users WHERE user_id = $1',
+                user_id
+            )
+            await conn.close()
+            
+            if user_data:
+                name = user_data['name']
+                birth_date = user_data['birth_date']
+                life_path = user_data['life_path_number']
+                zodiac = user_data['zodiac_sign']
+                
+                # Сохраняем в контекст
+                context.user_data['name'] = name
+                context.user_data['birth_date'] = birth_date
+                context.user_data['life_path'] = life_path
+                context.user_data['zodiac'] = zodiac
+        except Exception as e:
+            logger.error(f"Ошибка получения данных: {e}")
+    
+    if not life_path:
+        await query.edit_message_text("Не удалось загрузить ваши данные 😞")
+        return
+    
+    number_data = NUMEROLOGY_TEXTS.get(life_path)
+    
+    if not number_data:
+        await query.edit_message_text(f"Данные для числа {life_path} пока не доступны")
+        return
+    
+    keyboard = [
+        [InlineKeyboardButton("📖 Читать полный разбор", callback_data=f'read_{life_path}')],
+        [InlineKeyboardButton("🌙 Гороскоп на январь", callback_data='horoscope')],
+        [InlineKeyboardButton("⬅️ В главное меню", callback_data='back_to_start')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    greeting = number_data['greeting'].format(name=name or 'дорогая')
+    
+    await query.edit_message_text(
+        f"✨ *ВАША НУМЕРОЛОГИЯ* ✨\n\n"
+        f"*{name}*\n"
+        f"Дата рождения: {birth_date}\n"
+        f"Знак зодиака: {zodiac}\n\n"
+        f"━━━━━━━━━━━━━━━\n\n"
+        f"{number_data['title']}\n\n"
+        f"{greeting}",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+
+async def back_to_start_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Возврат в главное меню"""
+    query = update.callback_query
+    await query.answer()
+    
+    user_id = query.from_user.id
+    name = context.user_data.get('name', 'дорогая')
+    birth_date = context.user_data.get('birth_date', '')
+    life_path = context.user_data.get('life_path', 0)
+    zodiac = context.user_data.get('zodiac', '')
+    
+    keyboard = [
+        [InlineKeyboardButton("📖 Мой нумерологический разбор", callback_data='my_report')],
+        [InlineKeyboardButton("🌙 Гороскоп на месяц", callback_data='horoscope')],
+        [InlineKeyboardButton("💬 Написать отзыв / Задать вопрос", callback_data='feedback')]
+    ]
+    reply_markup = InlineKeyboardMarkup(keyboard)
+    
+    await query.edit_message_text(
+        f"✨ *ГЛАВНОЕ МЕНЮ* ✨\n\n"
+        f"👤 {name}\n"
+        f"📅 {birth_date}\n"
+        f"🔢 Число пути: {life_path}\n"
+        f"♈ Знак: {zodiac}\n\n"
+        f"Выберите действие:",
+        parse_mode='Markdown',
+        reply_markup=reply_markup
+    )
+
+
 async def show_section(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Показ конкретного раздела"""
     query = update.callback_query
@@ -1625,6 +1785,8 @@ def main():
     application.add_handler(admin_reply_conv)
     application.add_handler(CallbackQueryHandler(read_full_report, pattern='^read_'))
     application.add_handler(CallbackQueryHandler(show_section, pattern='^section_'))
+    application.add_handler(CallbackQueryHandler(my_report_handler, pattern='^my_report$'))
+    application.add_handler(CallbackQueryHandler(back_to_start_handler, pattern='^back_to_start$'))
     
     print("🚀 Бот запущен!")
     print("Напиши боту /start в Telegram")
