@@ -1736,6 +1736,25 @@ async def check_payment_handler(update: Update, context: ContextTypes.DEFAULT_TY
         # Отмечаем в БД
         await mark_as_paid(user_id, payment_id)
         
+        # Отправляем уведомление админу о покупке
+        if ADMIN_ID:
+            try:
+                username = query.from_user.username or ""
+                user_name = query.from_user.first_name or "Пользователь"
+                
+                await context.bot.send_message(
+                    chat_id=ADMIN_ID,
+                    text=f"💰 *НОВАЯ ОПЛАТА!*\n\n"
+                         f"👤 {user_name}\n"
+                         f"🆔 User ID: `{user_id}`\n"
+                         f"👤 Username: @{username}\n"
+                         f"💵 Сумма: {PRICE} ₽\n"
+                         f"🆔 Payment ID: `{payment_id}`",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                logger.error(f"Ошибка отправки уведомления админу: {e}")
+        
         await query.message.reply_text(
             "✅ Оплата подтверждена! Спасибо! 💝\n\n"
             "Теперь давайте познакомимся 😊\n\n"
@@ -2164,6 +2183,82 @@ async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ConversationHandler.END
 
 
+async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Статистика для администратора"""
+    user_id = update.message.from_user.id
+    
+    # Проверяем что это админ
+    if str(user_id) != ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа к этой команде")
+        return
+    
+    if not DATABASE_URL:
+        await update.message.reply_text("База данных не подключена")
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Общее количество пользователей
+        total_users = await conn.fetchval('SELECT COUNT(*) FROM users')
+        
+        # Количество оплативших
+        paid_users = await conn.fetchval('SELECT COUNT(*) FROM users WHERE paid = TRUE')
+        
+        # Количество сообщений обратной связи
+        feedback_count = await conn.fetchval('SELECT COUNT(*) FROM feedback')
+        
+        # Не отвеченные сообщения
+        unanswered_feedback = await conn.fetchval('SELECT COUNT(*) FROM feedback WHERE replied = FALSE')
+        
+        # Общая сумма продаж
+        total_revenue = paid_users * PRICE if paid_users else 0
+        
+        # Последние 5 оплат
+        recent_payments = await conn.fetch('''
+            SELECT name, birth_date, created_at 
+            FROM users 
+            WHERE paid = TRUE 
+            ORDER BY created_at DESC 
+            LIMIT 5
+        ''')
+        
+        await conn.close()
+        
+        # Формируем сообщение
+        stats_text = f"""📊 *СТАТИСТИКА БОТА*
+
+👥 *Пользователи:*
+Всего: {total_users}
+Оплатили: {paid_users}
+Конверсия: {(paid_users/total_users*100 if total_users > 0 else 0):.1f}%
+
+💰 *Финансы:*
+Общий доход: {total_revenue} ₽
+Средний чек: {PRICE} ₽
+
+💬 *Обратная связь:*
+Всего сообщений: {feedback_count}
+Не отвечено: {unanswered_feedback}
+
+📈 *Последние оплаты:*
+"""
+        
+        if recent_payments:
+            for payment in recent_payments:
+                name = payment['name'] or 'Неизвестно'
+                date = payment['created_at'].strftime('%d.%m %H:%M')
+                stats_text += f"\n• {name} - {date}"
+        else:
+            stats_text += "\nПока нет оплат"
+        
+        await update.message.reply_text(stats_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        logger.error(f"Ошибка получения статистики: {e}")
+        await update.message.reply_text(f"Ошибка: {e}")
+
+
 def main():
     """Запуск бота"""
     TOKEN = os.getenv('TELEGRAM_BOT_TOKEN', 'YOUR_BOT_TOKEN_HERE')
@@ -2219,6 +2314,7 @@ def main():
     application.add_handler(conv_handler)
     application.add_handler(feedback_conv)
     application.add_handler(admin_reply_conv)
+    application.add_handler(CommandHandler('admin', admin_stats))
     application.add_handler(CallbackQueryHandler(read_full_report, pattern='^read_'))
     application.add_handler(CallbackQueryHandler(show_section, pattern='^section_'))
     application.add_handler(CallbackQueryHandler(my_report_handler, pattern='^my_report$'))
