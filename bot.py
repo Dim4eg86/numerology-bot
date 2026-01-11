@@ -200,7 +200,7 @@ def create_payment_link(user_id, amount=PRICE):
         },
         "confirmation": {
             "type": "redirect",
-            "return_url": "https://t.me/astro_numero_bot"  # Замени на username бота
+            "return_url": "https://t.me/sefirum_astro_bot"
         },
         "capture": True,
         "description": f"Нумерологический разбор для пользователя {user_id}",
