@@ -36,7 +36,7 @@ WAITING_NAME, WAITING_DATE, WAITING_FEEDBACK, ADMIN_REPLY = range(4)
 # YooKassa настройки
 YOOKASSA_SHOP_ID = os.getenv('YOOKASSA_SHOP_ID', '1216288')
 YOOKASSA_SECRET_KEY = os.getenv('YOOKASSA_SECRET_KEY', 'live_ghw_QjfPTHOz06kkElqJGHqCZqAHxO9EtS1vdABx8BU')
-PRICE = 390  # Цена в рублях
+PRICE = 290  # Цена в рублях
 
 # Admin ID (твой Telegram ID для обратной связи)
 ADMIN_ID = os.getenv('ADMIN_TELEGRAM_ID', '')  # Добавим потом
@@ -103,6 +103,52 @@ async def init_db():
     except Exception as e:
         logger.error(f"Ошибка инициализации БД: {e}")
         return None
+
+
+async def save_feedback(user_id, username, name, message):
+    """Сохранить обратную связь"""
+    if not DATABASE_URL:
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        await conn.execute('''
+            INSERT INTO feedback (user_id, username, name, message)
+            VALUES ($1, $2, $3, $4)
+        ''', user_id, username, name, message)
+        await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения обратной связи: {e}")
+
+
+async def log_user_action(user_id, username, action):
+    """Логировать действия пользователей"""
+    if not DATABASE_URL:
+        return
+    
+    try:
+        conn = await asyncpg.connect(DATABASE_URL)
+        
+        # Создаём таблицу статистики если её нет
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS user_actions (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                username TEXT,
+                action TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        ''')
+        
+        # Записываем действие
+        await conn.execute('''
+            INSERT INTO user_actions (user_id, username, action, created_at)
+            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+        ''', user_id, username, action)
+        
+        await conn.close()
+    except Exception as e:
+        logger.error(f"Ошибка сохранения действия: {e}")
 
 
 async def save_user(user_id, username, name, birth_date, life_path, zodiac):
@@ -1558,6 +1604,10 @@ HOROSCOPES = {
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Команда /start с картинкой и проверкой оплаты"""
     user_id = update.message.from_user.id
+    username = update.message.from_user.username or ""
+    
+    # Логируем что пользователь нажал старт
+    await log_user_action(user_id, username, 'start')
     
     # Проверяем оплачивал ли пользователь раньше
     has_paid = await check_payment(user_id)
@@ -1619,7 +1669,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     # Новый пользователь - показываем приветствие
     keyboard = [
-        [InlineKeyboardButton("✨ Узнать своё предназначение — 390 ₽", callback_data='buy')]
+        [InlineKeyboardButton("✨ Узнать своё предназначение — 290 ₽", callback_data='buy')]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -1632,7 +1682,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "🔮 Персональный гороскоп\n"
         "❤️ Советы по отношениям и карьере\n"
         "💡 Рекомендации для успеха\n\n"
-        "💰 *Цена: 390 ₽*\n\n"
+        "💰 *Цена: 290 ₽*\n\n"
         "⭐ Более 1000 довольных клиентов!"
     )
     
@@ -1673,6 +1723,10 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await query.answer()
     
     user_id = query.from_user.id
+    username = query.from_user.username or ""
+    
+    # Логируем клик на кнопку купить
+    await log_user_action(user_id, username, 'click_buy')
     
     # Проверяем оплату в БД
     has_paid = await check_payment(user_id)
@@ -1693,14 +1747,14 @@ async def buy_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             context.user_data['payment_id'] = payment_id
             
             keyboard = [
-                [InlineKeyboardButton("💳 Оплатить 390 ₽", url=payment_url)],
+                [InlineKeyboardButton("💳 Оплатить 290 ₽", url=payment_url)],
                 [InlineKeyboardButton("✅ Я оплатил(а)", callback_data='check_payment')]
             ]
             reply_markup = InlineKeyboardMarkup(keyboard)
             
             await query.message.reply_text(
                 "💰 *Оплата нумерологического разбора*\n\n"
-                "Цена: *390 ₽*\n\n"
+                "Цена: *290 ₽*\n\n"
                 "После оплаты нажмите кнопку \"Я оплатил(а)\"\n\n"
                 "🔒 Безопасная оплата через ЮKassa",
                 parse_mode='Markdown',
@@ -2205,6 +2259,15 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Количество оплативших
         paid_users = await conn.fetchval('SELECT COUNT(*) FROM users WHERE paid = TRUE')
         
+        # ВОРОНКА: подсчитываем действия
+        total_starts = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM user_actions WHERE action = 'start'"
+        ) or 0
+        
+        total_clicks_buy = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM user_actions WHERE action = 'click_buy'"
+        ) or 0
+        
         # Количество сообщений обратной связи
         feedback_count = await conn.fetchval('SELECT COUNT(*) FROM feedback')
         
@@ -2223,26 +2286,54 @@ async def admin_stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
             LIMIT 5
         ''')
         
+        # Статистика за сегодня
+        today_starts = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM user_actions WHERE action = 'start' AND created_at > CURRENT_DATE"
+        ) or 0
+        
+        today_clicks = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM user_actions WHERE action = 'click_buy' AND created_at > CURRENT_DATE"
+        ) or 0
+        
+        today_paid = await conn.fetchval(
+            "SELECT COUNT(*) FROM users WHERE paid = TRUE AND created_at > CURRENT_DATE"
+        ) or 0
+        
         await conn.close()
+        
+        # Расчёт конверсий
+        conversion_to_click = (total_clicks_buy / total_starts * 100) if total_starts > 0 else 0
+        conversion_to_pay = (paid_users / total_clicks_buy * 100) if total_clicks_buy > 0 else 0
+        conversion_total = (paid_users / total_starts * 100) if total_starts > 0 else 0
         
         # Формируем сообщение
         stats_text = f"""📊 *СТАТИСТИКА БОТА*
 
-👥 *Пользователи:*
-Всего: {total_users}
-Оплатили: {paid_users}
-Конверсия: {(paid_users/total_users*100 if total_users > 0 else 0):.1f}%
+🎯 *ВОРОНКА ПРОДАЖ:*
+1️⃣ Нажали /start: {total_starts}
+2️⃣ Нажали "Купить": {total_clicks_buy} ({conversion_to_click:.1f}%)
+3️⃣ Оплатили: {paid_users} ({conversion_to_pay:.1f}%)
 
-💰 *Финансы:*
+📈 *Общая конверсия:* {conversion_total:.1f}%
+
+━━━━━━━━━━━━━━━
+
+📅 *СЕГОДНЯ:*
+• Запустили бота: {today_starts}
+• Нажали "Купить": {today_clicks}
+• Оплатили: {today_paid}
+
+💰 *ФИНАНСЫ:*
 Общий доход: {total_revenue} ₽
 Средний чек: {PRICE} ₽
 
-💬 *Обратная связь:*
+💬 *ОБРАТНАЯ СВЯЗЬ:*
 Всего сообщений: {feedback_count}
 Не отвечено: {unanswered_feedback}
 
-📈 *Последние оплаты:*
-"""
+━━━━━━━━━━━━━━━
+
+📈 *Последние оплаты:*"""
         
         if recent_payments:
             for payment in recent_payments:
