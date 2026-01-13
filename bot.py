@@ -2001,7 +2001,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
-    # Отправляем ВИДЕО с текстом
+    # Текст приветствия
     caption = (
         "🌟 *УЗНАЙТЕ СВОЁ ПРЕДНАЗНАЧЕНИЕ!* 🌙\n\n"
         "✨ Откройте тайны своей судьбы\n\n"
@@ -2013,19 +2013,27 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "⭐ Начните с бесплатного разбора!"
     )
     
-    # File ID твоего видео
-    video_file_id = "CgACAgIAAxkBAAFAoRtpZg2aRzoPFeVYUmpoIH1yfpCYYQACtoYAAklTMEtSQ0v_med2eDgE"
+    # Путь к видео на сервере (будет загружено из GitHub)
+    video_path = os.path.join(os.path.dirname(__file__), 'welcome_video.mp4')
     
-    try:
-        # Пробуем отправить видео
-        await update.message.reply_animation(
-            animation=video_file_id,
-            caption=caption,
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-    except:
-        # Если видео не работает - отправляем просто текст
+    # Пробуем отправить видео
+    video_sent = False
+    
+    if os.path.exists(video_path):
+        try:
+            with open(video_path, 'rb') as video:
+                await update.message.reply_animation(
+                    animation=video,
+                    caption=caption,
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+                video_sent = True
+        except Exception as e:
+            logger.error(f"Ошибка отправки видео с сервера: {e}")
+    
+    # Если видео не получилось отправить - просто текст
+    if not video_sent:
         await update.message.reply_text(
             caption,
             parse_mode='Markdown',
