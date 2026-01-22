@@ -2206,7 +2206,7 @@ async def free_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение даты для бесплатного разбора"""
+    """Получение даты для бесплатного разбора - отправляем ЧАСТЯМИ с кнопками"""
     birth_date = update.message.text.strip()
     
     if not birth_date.count('.') == 2:
@@ -2231,9 +2231,41 @@ async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT
     context.user_data['life_path'] = life_path
     context.user_data['zodiac'] = zodiac
     
-    # Получаем короткий текст
+    # Получаем полный текст и разбиваем его на части
     free_text = FREE_NUMBER_TEXTS.get(life_path, FREE_NUMBER_TEXTS[3])
     
+    # Разбиваем текст по 🔒 символам
+    parts = free_text.split('🔒')
+    
+    # Отправляем первую часть (до первого 🔒)
+    await update.message.reply_text(
+        parts[0].strip(),
+        parse_mode='Markdown'
+    )
+    
+    # Для каждой части с 🔒 - отправляем кнопку "Узнать"
+    for i in range(1, len(parts)):
+        # Создаём кнопку для этого блока
+        keyboard = [[InlineKeyboardButton("🔓 Узнать в полном разборе → 190₽", callback_data='buy')]]
+        reply_markup = InlineKeyboardMarkup(keyboard)
+        
+        # Отправляем кнопку
+        await update.message.reply_text(
+            "👆 *Хотите узнать?*",
+            parse_mode='Markdown',
+            reply_markup=reply_markup
+        )
+        
+        # Если есть ещё текст после 🔒 - отправляем его
+        if i < len(parts):
+            remaining_text = parts[i].split('*[')[0].strip()  # Убираем [текст в скобках]
+            if remaining_text and len(remaining_text) > 10:
+                await update.message.reply_text(
+                    remaining_text,
+                    parse_mode='Markdown'
+                )
+    
+    # В конце - главные кнопки
     keyboard = [
         [InlineKeyboardButton("💎 Получить полный разбор — 190 ₽", callback_data='buy')],
         [InlineKeyboardButton("🏠 Главное меню", callback_data='back_to_main_menu')]
@@ -2241,7 +2273,8 @@ async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        free_text,
+        "━━━━━━━━━━━━━━━\n\n"
+        "🌟 *Готовы узнать ВСЁ о себе?*",
         parse_mode='Markdown',
         reply_markup=reply_markup
     )
