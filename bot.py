@@ -2072,6 +2072,54 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Логируем что пользователь нажал старт
     await log_user_action(user_id, username, 'start')
     
+    # Проверяем есть ли параметр (deep linking)
+    if context.args and len(context.args) > 0:
+        param = context.args[0]
+        
+        # Если параметр buy - сразу показываем окно оплаты
+        if param == 'buy':
+            # Проверяем оплачивал ли раньше
+            has_paid = await check_payment(user_id)
+            
+            if has_paid:
+                # Уже оплачивал - показываем главное меню
+                keyboard = [
+                    [InlineKeyboardButton("📖 Мой разбор", callback_data='my_report')],
+                    [InlineKeyboardButton("🔮 Мой гороскоп", callback_data='horoscope')],
+                    [InlineKeyboardButton("💬 Обратная связь", callback_data='feedback')]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    "✨ Вы уже получили свой разбор!\n\n"
+                    "Выберите что хотите посмотреть:",
+                    reply_markup=reply_markup
+                )
+                return ConversationHandler.END
+            else:
+                # Ещё не оплачивал - показываем окно оплаты
+                payment_id = str(uuid.uuid4())
+                context.user_data['payment_id'] = payment_id
+                
+                payment_url = create_payment(payment_id, PRICE, user_id)
+                
+                keyboard = [
+                    [InlineKeyboardButton("💳 Оплатить 190 ₽", url=payment_url)],
+                    [InlineKeyboardButton("✅ Я оплатил(а)", callback_data='check_payment')]
+                ]
+                reply_markup = InlineKeyboardMarkup(keyboard)
+                
+                await update.message.reply_text(
+                    "💰 *Оплата нумерологического разбора*\n\n"
+                    "Цена: *190 ₽*\n\n"
+                    "После оплаты нажмите кнопку \"Я оплатил(а)\"\n\n"
+                    "🔒 Безопасная оплата через ЮKassa",
+                    parse_mode='Markdown',
+                    reply_markup=reply_markup
+                )
+                return ConversationHandler.END
+    
+    # Обычный старт без параметров
     # Проверяем оплачивал ли пользователь раньше
     has_paid = await check_payment(user_id)
     
@@ -2206,7 +2254,7 @@ async def free_number_handler(update: Update, context: ContextTypes.DEFAULT_TYPE
 
 
 async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Получение даты для бесплатного разбора - отправляем ЧАСТЯМИ с кнопками"""
+    """Получение даты для бесплатного разбора"""
     birth_date = update.message.text.strip()
     
     if not birth_date.count('.') == 2:
@@ -2231,41 +2279,27 @@ async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT
     context.user_data['life_path'] = life_path
     context.user_data['zodiac'] = zodiac
     
-    # Получаем полный текст и разбиваем его на части
+    # Получаем текст
     free_text = FREE_NUMBER_TEXTS.get(life_path, FREE_NUMBER_TEXTS[3])
     
-    # Разбиваем текст по 🔒 символам
-    parts = free_text.split('🔒')
+    # Заменяем 🔒 блоки на КЛИКАБЕЛЬНЫЕ ссылки
+    import re
     
-    # Отправляем первую часть (до первого 🔒)
-    await update.message.reply_text(
-        parts[0].strip(),
-        parse_mode='Markdown'
-    )
+    # Паттерн: 🔒 *[Текст внутри скобок]*
+    # Заменяем на: [👉 Текст — узнайте в полном разборе ⬇️](https://t.me/sefirum_astro_bot?start=buy)
     
-    # Для каждой части с 🔒 - отправляем кнопку "Узнать"
-    for i in range(1, len(parts)):
-        # Создаём кнопку для этого блока
-        keyboard = [[InlineKeyboardButton("🔓 Узнать в полном разборе → 190₽", callback_data='buy')]]
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
-        # Отправляем кнопку
-        await update.message.reply_text(
-            "👆 *Хотите узнать?*",
-            parse_mode='Markdown',
-            reply_markup=reply_markup
-        )
-        
-        # Если есть ещё текст после 🔒 - отправляем его
-        if i < len(parts):
-            remaining_text = parts[i].split('*[')[0].strip()  # Убираем [текст в скобках]
-            if remaining_text and len(remaining_text) > 10:
-                await update.message.reply_text(
-                    remaining_text,
-                    parse_mode='Markdown'
-                )
+    def replace_lock(match):
+        text = match.group(1)  # Текст внутри скобок
+        return f"\n\n[👉 {text} — *узнайте в полном разборе* ⬇️](https://t.me/sefirum_astro_bot?start=buy)\n"
     
-    # В конце - главные кнопки
+    free_text = re.sub(r'🔒 \*\[(.*?)\]\*', replace_lock, free_text)
+    
+    # Добавляем финальный призыв
+    free_text += "\n\n━━━━━━━━━━━━━━━\n\n"
+    free_text += "💎 *ХОТИТЕ УЗНАТЬ ВСЁ О СЕБЕ?*\n"
+    free_text += "👇 *Нажмите на любую ссылку выше или кнопку ниже*"
+    
+    # Кнопки внизу (на всякий случай)
     keyboard = [
         [InlineKeyboardButton("💎 Получить полный разбор — 190 ₽", callback_data='buy')],
         [InlineKeyboardButton("🏠 Главное меню", callback_data='back_to_main_menu')]
@@ -2273,10 +2307,10 @@ async def free_number_date_handler(update: Update, context: ContextTypes.DEFAULT
     reply_markup = InlineKeyboardMarkup(keyboard)
     
     await update.message.reply_text(
-        "━━━━━━━━━━━━━━━\n\n"
-        "🌟 *Готовы узнать ВСЁ о себе?*",
+        free_text,
         parse_mode='Markdown',
-        reply_markup=reply_markup
+        reply_markup=reply_markup,
+        disable_web_page_preview=True  # Отключаем превью ссылок
     )
     
     return ConversationHandler.END
